@@ -1,6 +1,9 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import LevelCanvas from './components/LevelCanvas.jsx';
+import AuthModal from './components/AuthModal.jsx';
+import LevelsPanel from './components/LevelsPanel.jsx';
 import useLevelStore from './store/useLevelStore.js';
+import { supabase } from './lib/supabase.js';
 
 const TOOLS = [
   { id: 'addVertex', label: 'Add Vertex', key: 'V' },
@@ -17,31 +20,52 @@ const TOOL_COLORS = {
 };
 
 export default function App() {
-  const [tool, setTool] = useState('addVertex');
-  const [status, setStatus] = useState('Click to place a vertex');
-  const fileInputRef = useRef(null);
-  const { clearLevel, loadLevel } = useLevelStore();
+  const [tool, setTool]                 = useState('addVertex');
+  const [status, setStatus]             = useState('Click to place a vertex');
+  const [user, setUser]                 = useState(null);
+  const [showAuth, setShowAuth]         = useState(false);
+  const [showPanel, setShowPanel]       = useState(false);
+  const [currentLevel, setCurrentLevel] = useState(null); // { id, name } | null
+  const fileInputRef                    = useRef(null);
+  const { clearLevel, loadLevel }       = useLevelStore();
 
-  function handleSave() {
+  // Auth state listener.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (!session) { setShowPanel(false); setCurrentLevel(null); }
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  async function handleSignOut() {
+    await supabase.auth.signOut();
+  }
+
+  // ── Local JSON export / import ───────────────────────────────────────────────
+  function handleExportJSON() {
     const { vertices, walls } = useLevelStore.getState();
-    const data = JSON.stringify({ vertices, walls }, null, 2);
+    const data = JSON.stringify({ version: 1, vertices, walls }, null, 2);
     const blob = new Blob([data], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'level.json';
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `${currentLevel?.name ?? 'level'}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
-  function handleLoad(e) {
+  function handleImportJSON(e) {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = ev => {
       try {
-        const data = JSON.parse(ev.target.result);
-        loadLevel(data);
+        loadLevel(JSON.parse(ev.target.result));
+        setCurrentLevel(null);
       } catch {
         alert('Invalid level file.');
       }
@@ -51,15 +75,19 @@ export default function App() {
   }
 
   function handleNew() {
-    if (confirm('Clear the current level?')) clearLevel();
+    if (confirm('Clear the current level?')) {
+      clearLevel();
+      setCurrentLevel(null);
+    }
   }
 
   return (
     <div style={styles.root}>
-      {/* Toolbar */}
+      {/* ── Toolbar ─────────────────────────────────────────────────────────── */}
       <div style={styles.toolbar}>
         <span style={styles.appTitle}>Level Maker</span>
 
+        {/* Drawing tools */}
         <div style={styles.toolGroup}>
           {TOOLS.map(t => (
             <button
@@ -76,26 +104,50 @@ export default function App() {
           ))}
         </div>
 
+        {/* File actions */}
         <div style={styles.toolGroup}>
           <button style={styles.actionBtn} onClick={handleNew}>New</button>
-          <button style={styles.actionBtn} onClick={handleSave}>Save JSON</button>
-          <button style={styles.actionBtn} onClick={() => fileInputRef.current.click()}>Load JSON</button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json"
-            style={{ display: 'none' }}
-            onChange={handleLoad}
-          />
+          <button style={styles.actionBtn} onClick={handleExportJSON}>Export JSON</button>
+          <button style={styles.actionBtn} onClick={() => fileInputRef.current.click()}>Import JSON</button>
+          <input ref={fileInputRef} type="file" accept=".json" style={{ display:'none' }} onChange={handleImportJSON} />
+        </div>
+
+        {/* Cloud / auth */}
+        <div style={{ ...styles.toolGroup, marginLeft: 'auto' }}>
+          {user ? (
+            <>
+              <button
+                style={{ ...styles.cloudBtn, ...(showPanel ? styles.cloudBtnActive : {}) }}
+                onClick={() => setShowPanel(v => !v)}
+                title="Cloud Levels"
+              >
+                ☁ Cloud
+                {currentLevel && <span style={styles.levelBadge}>{currentLevel.name}</span>}
+              </button>
+              <span style={styles.userEmail}>{user.email}</span>
+              <button style={styles.actionBtn} onClick={handleSignOut}>Sign Out</button>
+            </>
+          ) : (
+            <button style={styles.signInBtn} onClick={() => setShowAuth(true)}>
+              Sign In to Cloud
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Canvas */}
+      {/* ── Canvas area ─────────────────────────────────────────────────────── */}
       <div style={styles.canvasWrap}>
         <LevelCanvas tool={tool} onStatus={setStatus} onToolChange={setTool} />
+        {showPanel && user && (
+          <LevelsPanel
+            onClose={() => setShowPanel(false)}
+            currentLevel={currentLevel}
+            setCurrentLevel={setCurrentLevel}
+          />
+        )}
       </div>
 
-      {/* Status bar */}
+      {/* ── Status bar ──────────────────────────────────────────────────────── */}
       <div style={styles.statusBar}>
         <span style={{ color: TOOL_COLORS[tool], fontWeight: 600, marginRight: 8 }}>
           [{TOOLS.find(t => t.id === tool)?.label}]
@@ -103,6 +155,9 @@ export default function App() {
         {status}
         <span style={styles.hint}>&nbsp;&nbsp;Scroll to zoom &nbsp;|&nbsp; Right-drag to pan &nbsp;|&nbsp; Esc to cancel</span>
       </div>
+
+      {/* ── Auth modal ──────────────────────────────────────────────────────── */}
+      {showAuth && <AuthModal onClose={() => setShowAuth(false)} />}
     </div>
   );
 }
@@ -118,7 +173,7 @@ const styles = {
   toolbar: {
     display: 'flex',
     alignItems: 'center',
-    gap: 16,
+    gap: 12,
     padding: '6px 12px',
     background: '#1e1e3f',
     borderBottom: '1px solid #2d2d60',
@@ -129,12 +184,13 @@ const styles = {
     fontWeight: 700,
     fontSize: 16,
     color: '#7c7cff',
-    marginRight: 8,
+    marginRight: 4,
     letterSpacing: 1,
   },
   toolGroup: {
     display: 'flex',
     gap: 6,
+    alignItems: 'center',
   },
   toolBtn: {
     padding: '4px 14px',
@@ -147,13 +203,57 @@ const styles = {
     transition: 'all 0.15s',
   },
   actionBtn: {
-    padding: '4px 14px',
+    padding: '4px 12px',
     background: '#252545',
     color: '#a0a0c0',
     border: '1px solid #35355a',
     borderRadius: 4,
     cursor: 'pointer',
     fontSize: 13,
+  },
+  cloudBtn: {
+    padding: '4px 12px',
+    background: '#1e3050',
+    color: '#64b5f6',
+    border: '1px solid #2a4a80',
+    borderRadius: 4,
+    cursor: 'pointer',
+    fontSize: 13,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  cloudBtnActive: {
+    background: '#2a4878',
+    borderColor: '#4488cc',
+  },
+  levelBadge: {
+    fontSize: 11,
+    color: '#90caf9',
+    background: '#1a3060',
+    padding: '1px 6px',
+    borderRadius: 10,
+    maxWidth: 120,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  signInBtn: {
+    padding: '4px 14px',
+    background: '#30306a',
+    color: '#a0a0ff',
+    border: '1px solid #4444a0',
+    borderRadius: 4,
+    cursor: 'pointer',
+    fontSize: 13,
+  },
+  userEmail: {
+    fontSize: 11,
+    color: '#606080',
+    maxWidth: 160,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
   },
   canvasWrap: {
     flex: 1,
