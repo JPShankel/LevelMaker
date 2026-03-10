@@ -31,6 +31,8 @@ export default function App() {
   const [currentLevel, setCurrentLevel] = useState(null); // { id, name } | null
   const fileInputRef                    = useRef(null);
   const { clearLevel, loadLevel }       = useLevelStore();
+  const canUndo = useLevelStore(s => s.history.length > 0);
+  const canRedo = useLevelStore(s => s.future.length  > 0);
 
   // Auth state listener.
   useEffect(() => {
@@ -138,6 +140,12 @@ export default function App() {
             style={styles.snapInput}
             title="Snap Y resolution"
           />
+        </div>
+
+        {/* Undo / Redo */}
+        <div style={styles.toolGroup}>
+          <button style={styles.actionBtn} disabled={!canUndo} onClick={() => useLevelStore.getState().undo()} title="Undo (Ctrl+Z)">Undo</button>
+          <button style={styles.actionBtn} disabled={!canRedo} onClick={() => useLevelStore.getState().redo()} title="Redo (Ctrl+Y)">Redo</button>
         </div>
 
         {/* File actions */}

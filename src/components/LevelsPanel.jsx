@@ -31,8 +31,8 @@ export default function LevelsPanel({ onClose, currentLevel, setCurrentLevel }) 
     setSaving(true);
     setError(null);
 
-    const { vertices, walls } = useLevelStore.getState();
-    const payload = { name, data: { version: 1, vertices, walls } };
+    const { vertices, lines } = useLevelStore.getState();
+    const payload = { name, data: { version: 1, vertices, lines } };
 
     let result;
     if (currentLevel && name === currentLevel.name) {

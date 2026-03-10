@@ -348,24 +348,22 @@ export default function LevelCanvas({ tool, snap, snapX, snapY, onStatus, onTool
       draggingLine = null;
 
       if ((toolRef.current === 'move' || toolRef.current === 'addVertex') && hovVtx) {
+        useLevelStore.getState().beginMove();
         dragging = { id: hovVtx };
       } else if (toolRef.current === 'move' && hovLine) {
         const { vertices, lines } = useLevelStore.getState();
         const w  = lines[hovLine];
-        const v1 = vertices[w.v1], v2 = vertices[w.v2];
         const { x: grabX, y: grabY } = mouseToWorld(e, canvas, camera);
 
         if (e.ctrlKey) {
-          // Extrude: duplicate both endpoints, connect back to originals, drag new line.
-          const store = useLevelStore.getState();
-          const n1id = store.addVertex(v1.x, v1.y);
-          const n2id = store.addVertex(v2.x, v2.y);
-          store.addLine(w.v1, n1id);
-          store.addLine(w.v2, n2id);
-          store.addLine(n1id, n2id);
-          draggingLine = { v1id: n1id, v2id: n2id,
-            grabX, grabY, origV1x: v1.x, origV1y: v1.y, origV2x: v2.x, origV2y: v2.y };
+          // Extrude: atomic compound action saves history once.
+          const result = useLevelStore.getState().extrudeLine(hovLine);
+          draggingLine = { v1id: result.n1id, v2id: result.n2id,
+            grabX, grabY, origV1x: result.origV1x, origV1y: result.origV1y,
+            origV2x: result.origV2x, origV2y: result.origV2y };
         } else {
+          const v1 = vertices[w.v1], v2 = vertices[w.v2];
+          useLevelStore.getState().beginMove();
           draggingLine = { id: hovLine, v1id: w.v1, v2id: w.v2,
             grabX, grabY, origV1x: v1.x, origV1y: v1.y, origV2x: v2.x, origV2y: v2.y };
         }
@@ -394,41 +392,47 @@ export default function LevelCanvas({ tool, snap, snapX, snapY, onStatus, onTool
 
       if (t === 'addVertex') {
         if (hovVtx) return; // clicked an existing vertex without dragging — ignore
-        const newId = useLevelStore.getState().addVertex(wx, wy);
-        // Split any line the new vertex lands on.
+        // Check for a line hit first so split is one atomic history entry.
         const { vertices, lines } = useLevelStore.getState();
+        let split = false;
         for (const [lineId, w] of Object.entries(lines)) {
           const v1 = vertices[w.v1], v2 = vertices[w.v2];
           if (!v1 || !v2) continue;
           if (Math.hypot(wx - v1.x, wy - v1.y) < 0.01) continue;
           if (Math.hypot(wx - v2.x, wy - v2.y) < 0.01) continue;
           if (ptSegDist(wx, wy, v1.x, v1.y, v2.x, v2.y) < LINE_HIT_DIST) {
-            const store = useLevelStore.getState();
-            store.deleteLine(lineId);
-            store.addLine(w.v1, newId);
-            store.addLine(newId, w.v2);
+            useLevelStore.getState().splitLine(lineId, wx, wy);
+            split = true;
             break;
           }
         }
+        if (!split) useLevelStore.getState().addVertex(wx, wy);
         return;
       }
 
       if (t === 'addLine') {
         if (!lineStart) {
-          if (hovVtx) {
-            lineStart = hovVtx;
-            refreshColors();
-            updatePreview(wx, wy);
-            emitStatus();
-          }
+          // Start from an existing vertex or place a new one.
+          const startId = hovVtx ?? useLevelStore.getState().addVertex(wx, wy);
+          lineStart = startId;
+          refreshColors();
+          updatePreview(wx, wy);
+          emitStatus();
         } else {
-          if (hovVtx && hovVtx !== lineStart) {
+          if (hovVtx === lineStart) return; // same vertex — ignore
+          if (hovVtx) {
+            // Complete line to existing vertex; stop drawing.
             useLevelStore.getState().addLine(lineStart, hovVtx);
             lineStart = null;
             prevLine.visible = false;
-            refreshColors();
-            emitStatus();
+          } else {
+            // Place a new vertex, complete line to it, keep drawing from there.
+            const newId = useLevelStore.getState().addVertexAndLine(lineStart, wx, wy);
+            lineStart = newId;
+            updatePreview(wx, wy);
           }
+          refreshColors();
+          emitStatus();
         }
         return;
       }
@@ -477,6 +481,17 @@ export default function LevelCanvas({ tool, snap, snapX, snapY, onStatus, onTool
         emitStatus();
         return;
       }
+      if (e.ctrlKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        useLevelStore.getState().undo();
+        return;
+      }
+      if (e.ctrlKey && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
+        e.preventDefault();
+        useLevelStore.getState().redo();
+        return;
+      }
+      if (e.ctrlKey) return; // don't fire tool shortcuts with ctrl held
       // Keyboard shortcuts for tools.
       const map = { v: 'addVertex', w: 'addLine', m: 'move', d: 'delete' };
       const next = map[e.key.toLowerCase()];
