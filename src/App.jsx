@@ -7,20 +7,23 @@ import { supabase } from './lib/supabase.js';
 
 const TOOLS = [
   { id: 'addVertex', label: 'Add Vertex', key: 'V' },
-  { id: 'addWall',   label: 'Add Wall',   key: 'W' },
+  { id: 'addLine',   label: 'Add Line',   key: 'W' },
   { id: 'move',      label: 'Move',       key: 'M' },
   { id: 'delete',    label: 'Delete',     key: 'D' },
 ];
 
 const TOOL_COLORS = {
   addVertex: '#00e5ff',
-  addWall:   '#69f0ae',
+  addLine:   '#69f0ae',
   move:      '#ffeb3b',
   delete:    '#ff5252',
 };
 
 export default function App() {
   const [tool, setTool]                 = useState('addVertex');
+  const [snap, setSnap]                 = useState(false);
+  const [snapX, setSnapX]               = useState(1);
+  const [snapY, setSnapY]               = useState(1);
   const [status, setStatus]             = useState('Click to place a vertex');
   const [user, setUser]                 = useState(null);
   const [showAuth, setShowAuth]         = useState(false);
@@ -47,8 +50,8 @@ export default function App() {
 
   // ── Local JSON export / import ───────────────────────────────────────────────
   function handleExportJSON() {
-    const { vertices, walls } = useLevelStore.getState();
-    const data = JSON.stringify({ version: 1, vertices, walls }, null, 2);
+    const { vertices, lines } = useLevelStore.getState();
+    const data = JSON.stringify({ version: 1, vertices, lines }, null, 2);
     const blob = new Blob([data], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
@@ -104,6 +107,39 @@ export default function App() {
           ))}
         </div>
 
+        {/* Snap to grid */}
+        <div style={styles.toolGroup}>
+          <button
+            style={{
+              ...styles.toolBtn,
+              ...(snap ? { background: '#4db6ac', color: '#111', fontWeight: 700 } : {}),
+            }}
+            onClick={() => setSnap(v => !v)}
+            title="Snap to Grid (G)"
+          >
+            Snap
+          </button>
+          <input
+            type="number"
+            min="0.125"
+            step="0.125"
+            value={snapX}
+            onChange={e => { const v = parseFloat(e.target.value); if (v > 0) setSnapX(v); }}
+            style={styles.snapInput}
+            title="Snap X resolution"
+          />
+          <span style={{ color: '#606080', fontSize: 11 }}>×</span>
+          <input
+            type="number"
+            min="0.125"
+            step="0.125"
+            value={snapY}
+            onChange={e => { const v = parseFloat(e.target.value); if (v > 0) setSnapY(v); }}
+            style={styles.snapInput}
+            title="Snap Y resolution"
+          />
+        </div>
+
         {/* File actions */}
         <div style={styles.toolGroup}>
           <button style={styles.actionBtn} onClick={handleNew}>New</button>
@@ -137,7 +173,7 @@ export default function App() {
 
       {/* ── Canvas area ─────────────────────────────────────────────────────── */}
       <div style={styles.canvasWrap}>
-        <LevelCanvas tool={tool} onStatus={setStatus} onToolChange={setTool} />
+        <LevelCanvas tool={tool} snap={snap} snapX={snapX} snapY={snapY} onStatus={setStatus} onToolChange={setTool} onSnapChange={setSnap} />
         {showPanel && user && (
           <LevelsPanel
             onClose={() => setShowPanel(false)}
@@ -153,7 +189,7 @@ export default function App() {
           [{TOOLS.find(t => t.id === tool)?.label}]
         </span>
         {status}
-        <span style={styles.hint}>&nbsp;&nbsp;Scroll to zoom &nbsp;|&nbsp; Right-drag to pan &nbsp;|&nbsp; Esc to cancel</span>
+        <span style={styles.hint}>&nbsp;&nbsp;Scroll to zoom &nbsp;|&nbsp; Right-drag to pan &nbsp;|&nbsp; G = snap &nbsp;|&nbsp; Esc to cancel</span>
       </div>
 
       {/* ── Auth modal ──────────────────────────────────────────────────────── */}
@@ -271,5 +307,15 @@ const styles = {
   hint: {
     opacity: 0.5,
     fontSize: 11,
+  },
+  snapInput: {
+    width: 54,
+    padding: '3px 6px',
+    background: '#1a1a38',
+    color: '#c0c0e0',
+    border: '1px solid #3a3a70',
+    borderRadius: 4,
+    fontSize: 13,
+    textAlign: 'right',
   },
 };

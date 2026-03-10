@@ -5,7 +5,7 @@ import useLevelStore from '../store/useLevelStore.js';
 // ─── Constants ────────────────────────────────────────────────────────────────
 const VERTEX_RADIUS  = 0.25;
 const HIT_RADIUS     = 0.55;   // world-unit radius for vertex click
-const WALL_HIT_DIST  = 0.3;    // world-unit distance to wall line for click
+const LINE_HIT_DIST  = 0.3;    // world-unit distance to line for click
 const INITIAL_VIEW_H = 24;     // initial frustum height in world units
 
 const C = {
@@ -14,12 +14,12 @@ const C = {
   GRID_MAJOR:        0x2a2a58,
   VERTEX:            0x00e5ff,
   VERTEX_HOVER:      0xffeb3b,
-  VERTEX_SELECTED:   0xff9800,  // wall-start selected
+  VERTEX_SELECTED:   0xff9800,  // line-start selected
   VERTEX_DEL_HOVER:  0xff1744,
-  WALL:              0x7986cb,
-  WALL_HOVER:        0xff9800,
-  WALL_DEL_HOVER:    0xff1744,
-  WALL_PREVIEW:      0x4db6ac,
+  LINE:              0x7986cb,
+  LINE_HOVER:        0xff9800,
+  LINE_DEL_HOVER:    0xff1744,
+  LINE_PREVIEW:      0x4db6ac,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -65,24 +65,38 @@ function makeCircle(x, y, color) {
   return m;
 }
 
-function makeWallLine(x1, y1, x2, y2, color) {
+function makeLine(x1, y1, x2, y2, color) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute([x1, y1, 0, x2, y2, 0], 3));
   return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
 }
 
+function snapCoord(x, y, enabled, gridX = 1, gridY = 1) {
+  if (!enabled) return { x, y };
+  return {
+    x: Math.round(x / gridX) * gridX,
+    y: Math.round(y / gridY) * gridY,
+  };
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
-export default function LevelCanvas({ tool, onStatus, onToolChange }) {
+export default function LevelCanvas({ tool, snap, snapX, snapY, onStatus, onToolChange, onSnapChange }) {
   const containerRef = useRef(null);
   const toolRef      = useRef(tool);
+  const snapRef      = useRef(snap);
+  const snapXRef     = useRef(snapX);
+  const snapYRef     = useRef(snapY);
 
-  // Keep tool ref in sync so the Three.js closure always reads current tool.
+  // Keep refs in sync so the Three.js closure always reads current values.
+  useEffect(() => { snapRef.current = snap; }, [snap]);
+  useEffect(() => { snapXRef.current = snapX; }, [snapX]);
+  useEffect(() => { snapYRef.current = snapY; }, [snapY]);
+
   useEffect(() => {
     toolRef.current = tool;
-    // Cancel an in-progress wall start if the user switches away from addWall.
-    if (tool !== 'addWall') {
-      // Signal the canvas to cancel wall mode via a custom event.
-      containerRef.current?.dispatchEvent(new CustomEvent('cancelWall'));
+    // Cancel an in-progress line start if the user switches away from addLine.
+    if (tool !== 'addLine') {
+      containerRef.current?.dispatchEvent(new CustomEvent('cancelLine'));
     }
   }, [tool]);
 
@@ -112,31 +126,32 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
 
     buildGrid(scene);
 
-    const wallGroup   = new THREE.Group();
-    const vertGroup   = new THREE.Group();
-    const previewGrp  = new THREE.Group();
-    scene.add(wallGroup, vertGroup, previewGrp);
+    const lineGroup  = new THREE.Group();
+    const vertGroup  = new THREE.Group();
+    const previewGrp = new THREE.Group();
+    scene.add(lineGroup, vertGroup, previewGrp);
 
-    // Preview line (wall tool).
+    // Preview line (add line tool).
     const prevGeo  = new THREE.BufferGeometry();
     prevGeo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0.05, 0,0,0.05], 3));
-    const prevLine = new THREE.Line(prevGeo, new THREE.LineBasicMaterial({ color: C.WALL_PREVIEW, transparent: true, opacity: 0.75 }));
+    const prevLine = new THREE.Line(prevGeo, new THREE.LineBasicMaterial({ color: C.LINE_PREVIEW, transparent: true, opacity: 0.75 }));
     prevLine.visible = false;
     previewGrp.add(prevLine);
 
     // ── Interaction state (all mutable, lives in the closure) ────────────────
     const vertMeshes = new Map();  // id -> Mesh
-    const wallLines  = new Map();  // id -> Line
-    let hovVtx  = null;   // hovered vertex id
-    let hovWall = null;   // hovered wall id
-    let wallStart = null; // first vertex selected in addWall mode
-    let dragging  = null; // { id } – vertex being dragged
-    let didDrag   = false;
-    let panning   = false;
-    let panOrigin = null; // { clientX, clientY, camX, camY }
+    const lineMeshes = new Map();  // id -> Line
+    let hovVtx       = null;   // hovered vertex id
+    let hovLine      = null;   // hovered line id
+    let lineStart    = null;   // first vertex selected in addLine mode
+    let dragging     = null;   // { id } – vertex being dragged
+    let draggingLine = null;   // { id, v1id, v2id, grabX, grabY, origV1x, origV1y, origV2x, origV2y }
+    let didDrag      = false;
+    let panning      = false;
+    let panOrigin    = null;   // { clientX, clientY, camX, camY }
 
     // ── Scene rebuild ────────────────────────────────────────────────────────
-    function rebuildScene({ vertices, walls }) {
+    function rebuildScene({ vertices, lines }) {
       // Vertices: remove stale, add new, update positions.
       for (const [id, mesh] of vertMeshes) {
         if (!vertices[id]) {
@@ -156,27 +171,27 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
         }
       }
 
-      // Walls: remove stale, add new, update positions.
-      for (const [id, line] of wallLines) {
-        if (!walls[id]) {
-          wallGroup.remove(line);
-          line.geometry.dispose();
-          line.material.dispose();
-          wallLines.delete(id);
+      // Lines: remove stale, add new, update positions.
+      for (const [id, mesh] of lineMeshes) {
+        if (!lines[id]) {
+          lineGroup.remove(mesh);
+          mesh.geometry.dispose();
+          mesh.material.dispose();
+          lineMeshes.delete(id);
         }
       }
-      for (const [id, w] of Object.entries(walls)) {
+      for (const [id, w] of Object.entries(lines)) {
         const v1 = vertices[w.v1], v2 = vertices[w.v2];
         if (!v1 || !v2) continue;
-        if (wallLines.has(id)) {
-          const pos = wallLines.get(id).geometry.attributes.position;
+        if (lineMeshes.has(id)) {
+          const pos = lineMeshes.get(id).geometry.attributes.position;
           pos.setXYZ(0, v1.x, v1.y, 0);
           pos.setXYZ(1, v2.x, v2.y, 0);
           pos.needsUpdate = true;
         } else {
-          const line = makeWallLine(v1.x, v1.y, v2.x, v2.y, C.WALL);
-          wallLines.set(id, line);
-          wallGroup.add(line);
+          const mesh = makeLine(v1.x, v1.y, v2.x, v2.y, C.LINE);
+          lineMeshes.set(id, mesh);
+          lineGroup.add(mesh);
         }
       }
       refreshColors();
@@ -187,7 +202,7 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
       const t = toolRef.current;
       for (const [id, mesh] of vertMeshes) {
         let col;
-        if (id === wallStart) {
+        if (id === lineStart) {
           col = C.VERTEX_SELECTED;
         } else if (id === hovVtx) {
           col = t === 'delete' ? C.VERTEX_DEL_HOVER : C.VERTEX_HOVER;
@@ -196,14 +211,14 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
         }
         mesh.material.color.setHex(col);
       }
-      for (const [id, line] of wallLines) {
+      for (const [id, mesh] of lineMeshes) {
         let col;
-        if (id === hovWall) {
-          col = t === 'delete' ? C.WALL_DEL_HOVER : C.WALL_HOVER;
+        if (id === hovLine) {
+          col = t === 'delete' ? C.LINE_DEL_HOVER : C.LINE_HOVER;
         } else {
-          col = C.WALL;
+          col = C.LINE;
         }
-        line.material.color.setHex(col);
+        mesh.material.color.setHex(col);
       }
     }
 
@@ -218,10 +233,10 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
       return bestId;
     }
 
-    function nearestWall(wx, wy) {
-      const { vertices, walls } = useLevelStore.getState();
-      let bestId = null, bestD = WALL_HIT_DIST;
-      for (const [id, w] of Object.entries(walls)) {
+    function nearestLine(wx, wy) {
+      const { vertices, lines } = useLevelStore.getState();
+      let bestId = null, bestD = LINE_HIT_DIST;
+      for (const [id, w] of Object.entries(lines)) {
         const v1 = vertices[w.v1], v2 = vertices[w.v2];
         if (!v1 || !v2) continue;
         const d = ptSegDist(wx, wy, v1.x, v1.y, v2.x, v2.y);
@@ -232,9 +247,9 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
 
     // ── Preview line update ──────────────────────────────────────────────────
     function updatePreview(wx, wy) {
-      if (wallStart && toolRef.current === 'addWall') {
+      if (lineStart && toolRef.current === 'addLine') {
         const { vertices } = useLevelStore.getState();
-        const v = vertices[wallStart];
+        const v = vertices[lineStart];
         if (v) {
           const pos = prevLine.geometry.attributes.position;
           pos.setXYZ(0, v.x, v.y, 0.05);
@@ -251,14 +266,14 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
     function emitStatus() {
       const t = toolRef.current;
       if (t === 'addVertex') { onStatus('Click to place a vertex'); return; }
-      if (t === 'addWall') {
-        onStatus(wallStart
-          ? 'Click another vertex to complete wall  |  Esc to cancel'
-          : 'Click a vertex to start a wall');
+      if (t === 'addLine') {
+        onStatus(lineStart
+          ? 'Click another vertex to complete line  |  Esc to cancel'
+          : 'Click a vertex to start a line');
         return;
       }
-      if (t === 'move')   { onStatus('Click and drag a vertex to move it'); return; }
-      if (t === 'delete') { onStatus('Click a vertex or wall to delete it'); return; }
+      if (t === 'move')   { onStatus('Click and drag a vertex or line to move it'); return; }
+      if (t === 'delete') { onStatus('Click a vertex or line to delete it'); return; }
     }
 
     // Initial scene build.
@@ -286,21 +301,36 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
       // Vertex drag
       if (dragging) {
         didDrag = true;
-        useLevelStore.getState().moveVertex(dragging.id, wx, wy);
+        const snapped = snapCoord(wx, wy, snapRef.current, snapXRef.current, snapYRef.current);
+        useLevelStore.getState().moveVertex(dragging.id, snapped.x, snapped.y);
+        return;
+      }
+
+      // Line drag — translate both endpoints by the grab delta
+      if (draggingLine) {
+        didDrag = true;
+        const dx = wx - draggingLine.grabX;
+        const dy = wy - draggingLine.grabY;
+        const store = useLevelStore.getState();
+        const s1 = snapCoord(draggingLine.origV1x + dx, draggingLine.origV1y + dy, snapRef.current, snapXRef.current, snapYRef.current);
+        const s2 = snapCoord(draggingLine.origV2x + dx, draggingLine.origV2y + dy, snapRef.current, snapXRef.current, snapYRef.current);
+        store.moveVertex(draggingLine.v1id, s1.x, s1.y);
+        store.moveVertex(draggingLine.v2id, s2.x, s2.y);
         return;
       }
 
       // Hover detection
       const newHovVtx  = nearestVertex(wx, wy);
-      const newHovWall = newHovVtx ? null : nearestWall(wx, wy);
+      const newHovLine = newHovVtx ? null : nearestLine(wx, wy);
 
-      if (newHovVtx !== hovVtx || newHovWall !== hovWall) {
+      if (newHovVtx !== hovVtx || newHovLine !== hovLine) {
         hovVtx  = newHovVtx;
-        hovWall = newHovWall;
+        hovLine = newHovLine;
         refreshColors();
       }
 
-      updatePreview(wx, wy);
+      const sp = snapCoord(wx, wy, snapRef.current, snapXRef.current, snapYRef.current);
+      updatePreview(sp.x, sp.y);
     }
 
     function onMouseDown(e) {
@@ -313,11 +343,32 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
       }
       if (e.button !== 0) return;
 
-      didDrag  = false;
-      dragging = null;
+      didDrag      = false;
+      dragging     = null;
+      draggingLine = null;
 
-      if (toolRef.current === 'move' && hovVtx) {
+      if ((toolRef.current === 'move' || toolRef.current === 'addVertex') && hovVtx) {
         dragging = { id: hovVtx };
+      } else if (toolRef.current === 'move' && hovLine) {
+        const { vertices, lines } = useLevelStore.getState();
+        const w  = lines[hovLine];
+        const v1 = vertices[w.v1], v2 = vertices[w.v2];
+        const { x: grabX, y: grabY } = mouseToWorld(e, canvas, camera);
+
+        if (e.ctrlKey) {
+          // Extrude: duplicate both endpoints, connect back to originals, drag new line.
+          const store = useLevelStore.getState();
+          const n1id = store.addVertex(v1.x, v1.y);
+          const n2id = store.addVertex(v2.x, v2.y);
+          store.addLine(w.v1, n1id);
+          store.addLine(w.v2, n2id);
+          store.addLine(n1id, n2id);
+          draggingLine = { v1id: n1id, v2id: n2id,
+            grabX, grabY, origV1x: v1.x, origV1y: v1.y, origV2x: v2.x, origV2y: v2.y };
+        } else {
+          draggingLine = { id: hovLine, v1id: w.v1, v2id: w.v2,
+            grabX, grabY, origV1x: v1.x, origV1y: v1.y, origV2x: v2.x, origV2y: v2.y };
+        }
       }
     }
 
@@ -329,33 +380,51 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
       }
       if (e.button !== 0) return;
 
-      const wasDragging = dragging && didDrag;
-      dragging = null;
-      didDrag  = false;
+      const wasDragging = (dragging || draggingLine) && didDrag;
+      dragging     = null;
+      draggingLine = null;
+      didDrag      = false;
 
       if (wasDragging) return; // suppress click after drag
 
       // ── Click actions ──
-      const { x: wx, y: wy } = mouseToWorld(e, canvas, camera);
+      const raw = mouseToWorld(e, canvas, camera);
+      const { x: wx, y: wy } = snapCoord(raw.x, raw.y, snapRef.current, snapXRef.current, snapYRef.current);
       const t = toolRef.current;
 
       if (t === 'addVertex') {
-        useLevelStore.getState().addVertex(wx, wy);
+        if (hovVtx) return; // clicked an existing vertex without dragging — ignore
+        const newId = useLevelStore.getState().addVertex(wx, wy);
+        // Split any line the new vertex lands on.
+        const { vertices, lines } = useLevelStore.getState();
+        for (const [lineId, w] of Object.entries(lines)) {
+          const v1 = vertices[w.v1], v2 = vertices[w.v2];
+          if (!v1 || !v2) continue;
+          if (Math.hypot(wx - v1.x, wy - v1.y) < 0.01) continue;
+          if (Math.hypot(wx - v2.x, wy - v2.y) < 0.01) continue;
+          if (ptSegDist(wx, wy, v1.x, v1.y, v2.x, v2.y) < LINE_HIT_DIST) {
+            const store = useLevelStore.getState();
+            store.deleteLine(lineId);
+            store.addLine(w.v1, newId);
+            store.addLine(newId, w.v2);
+            break;
+          }
+        }
         return;
       }
 
-      if (t === 'addWall') {
-        if (!wallStart) {
+      if (t === 'addLine') {
+        if (!lineStart) {
           if (hovVtx) {
-            wallStart = hovVtx;
+            lineStart = hovVtx;
             refreshColors();
             updatePreview(wx, wy);
             emitStatus();
           }
         } else {
-          if (hovVtx && hovVtx !== wallStart) {
-            useLevelStore.getState().addWall(wallStart, hovVtx);
-            wallStart = null;
+          if (hovVtx && hovVtx !== lineStart) {
+            useLevelStore.getState().addLine(lineStart, hovVtx);
+            lineStart = null;
             prevLine.visible = false;
             refreshColors();
             emitStatus();
@@ -368,9 +437,9 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
         if (hovVtx) {
           useLevelStore.getState().deleteVertex(hovVtx);
           hovVtx = null;
-        } else if (hovWall) {
-          useLevelStore.getState().deleteWall(hovWall);
-          hovWall = null;
+        } else if (hovLine) {
+          useLevelStore.getState().deleteLine(hovLine);
+          hovLine = null;
         }
         refreshColors();
         return;
@@ -402,20 +471,21 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
 
     function onKeyDown(e) {
       if (e.key === 'Escape') {
-        wallStart = null;
+        lineStart = null;
         prevLine.visible = false;
         refreshColors();
         emitStatus();
         return;
       }
       // Keyboard shortcuts for tools.
-      const map = { v: 'addVertex', w: 'addWall', m: 'move', d: 'delete' };
+      const map = { v: 'addVertex', w: 'addLine', m: 'move', d: 'delete' };
       const next = map[e.key.toLowerCase()];
-      if (next) onToolChange(next);
+      if (next) { onToolChange(next); return; }
+      if (e.key.toLowerCase() === 'g') onSnapChange(v => !v);
     }
 
-    function onCancelWall() {
-      wallStart = null;
+    function onCancelLine() {
+      lineStart = null;
       prevLine.visible = false;
       refreshColors();
       emitStatus();
@@ -431,7 +501,7 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
     canvas.addEventListener('contextmenu', noCtx);
     window.addEventListener('keydown',     onKeyDown);
     window.addEventListener('resize',      onResize);
-    container.addEventListener('cancelWall', onCancelWall);
+    container.addEventListener('cancelLine', onCancelLine);
 
     // ── Render loop ──────────────────────────────────────────────────────────
     let raf;
@@ -451,7 +521,7 @@ export default function LevelCanvas({ tool, onStatus, onToolChange }) {
       canvas.removeEventListener('contextmenu', noCtx);
       window.removeEventListener('keydown',     onKeyDown);
       window.removeEventListener('resize',      onResize);
-      container.removeEventListener('cancelWall', onCancelWall);
+      container.removeEventListener('cancelLine', onCancelLine);
       renderer.dispose();
       if (container.contains(canvas)) container.removeChild(canvas);
     };

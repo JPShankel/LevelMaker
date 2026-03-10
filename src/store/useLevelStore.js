@@ -5,7 +5,7 @@ const genId = () => String(_nextId++);
 
 const useLevelStore = create((set, get) => ({
   vertices: {},  // { [id]: { id, x, y } }
-  walls: {},     // { [id]: { id, v1, v2 } }
+  lines: {},     // { [id]: { id, v1, v2 } }
 
   addVertex(x, y) {
     const id = genId();
@@ -21,44 +21,44 @@ const useLevelStore = create((set, get) => ({
     set(s => {
       const vertices = { ...s.vertices };
       delete vertices[id];
-      const walls = Object.fromEntries(
-        Object.entries(s.walls).filter(([, w]) => w.v1 !== id && w.v2 !== id)
+      const lines = Object.fromEntries(
+        Object.entries(s.lines).filter(([, w]) => w.v1 !== id && w.v2 !== id)
       );
-      return { vertices, walls };
+      return { vertices, lines };
     });
   },
 
-  addWall(v1, v2) {
+  addLine(v1, v2) {
     if (v1 === v2) return null;
-    const dupe = Object.values(get().walls).find(
+    const dupe = Object.values(get().lines).find(
       w => (w.v1 === v1 && w.v2 === v2) || (w.v1 === v2 && w.v2 === v1)
     );
     if (dupe) return null;
     const id = genId();
-    set(s => ({ walls: { ...s.walls, [id]: { id, v1, v2 } } }));
+    set(s => ({ lines: { ...s.lines, [id]: { id, v1, v2 } } }));
     return id;
   },
 
-  deleteWall(id) {
+  deleteLine(id) {
     set(s => {
-      const walls = { ...s.walls };
-      delete walls[id];
-      return { walls };
+      const lines = { ...s.lines };
+      delete lines[id];
+      return { lines };
     });
   },
 
   clearLevel() {
-    set({ vertices: {}, walls: {} });
+    set({ vertices: {}, lines: {} });
   },
 
   loadLevel(data) {
     const allIds = [
       ...Object.keys(data.vertices || {}),
-      ...Object.keys(data.walls || {}),
+      ...Object.keys(data.lines || {}),
     ];
     const maxId = Math.max(0, ...allIds.map(id => parseInt(id, 10)).filter(n => !isNaN(n)));
     _nextId = maxId + 1;
-    set({ vertices: data.vertices || {}, walls: data.walls || {} });
+    set({ vertices: data.vertices || {}, lines: data.lines || {} });
   },
 }));
 
